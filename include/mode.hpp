@@ -15,8 +15,11 @@ Undead Reckoning
 #include <rclcpp/rclcpp.hpp>
 #include <px4_ros2/components/mode.hpp>
 #include <px4_ros2/components/mode_executor.hpp>
-#include <px4_ros2/control/setpoint_types/fixedwing/lateral_longitudinal.hpp>
+
+#include <px4_ros2/control/setpoint_types/experimental/attitude.hpp>
 #include <px4_ros2/odometry/attitude.hpp>
+#include <px4_ros2/odometry/local_position.hpp>
+
 // Core control setpoints
 #include <px4_msgs/msg/vehicle_attitude_setpoint.hpp> // Set desired attitude
 #include <px4_msgs/msg/vehicle_thrust_setpoint.hpp> // Set desired thrust level
@@ -24,12 +27,13 @@ Undead Reckoning
 // Vehicle state feedback
 #include <px4_msgs/msg/vehicle_attitude.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
+
 #include <cmath>
 
 
 using namespace std::chrono_literals; // NOLINT
 
-static const std::string kName = "NAME";
+static const std::string kName = "UNDEADRECKONING-FLIGHT";
 
 class UASFlightMode : public px4_ros2::ModeBase
 {
@@ -42,32 +46,18 @@ public:
         _attitude_setpoint_pub = this->node().create_publisher<px4_msgs::msg::VehicleAttitudeSetpoint>(
             "/fmu/in/vehicle_attitude_setpoint",10);
         
+
         _thrust_setpoint_pub = this->node().create_publisher<px4_msgs::msg::VehicleThrustSetpoint>(
             "/fmu/in/vehicle_thrust_setpoint", 10);
         
-        /*
-        Don't think any of this worked
-        // Subscribers for feedback
-        _attitude_sub = this->node().create_subscription<px4_msgs::msg::VehicleAttitude>(
-            "/fmu/out/vehicle_attitude", 10,
-            [this](const px4_msgs::msg::VehicleAttitude::SharedPtr msg){
-                _current_attitude = *msg; // Get current attitude QUATERNION
-            }
-        );
-
-        _local_position_sub = this->node().create_subscription<px4_msgs::msg::VehicleLocalPosition>(
-            "/fmu/out/vehicle_local_position", 10,
-            [this](const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg){
-                _current_position = *msg; // Get current position
-            }
-        );*/
-
-        
         // Goto setpoints allow you to set a target position for the UAS to move 
         // to, along with option heading and max speed values.
-        _goto_setpoint = std::make_shared<px4_ros2::FwLateralLongitudinalSetpointType>(*this);
         
         _vehicle_state = std::make_shared<px4_ros2::OdometryAttitude>(*this);
+
+        _vehicle_local_position = std::make_shared<px4_ros2::OdometryLocalPosition>(*this);
+
+        _attitude_sp_type = std::make_shared<px4_ros2::AttitudeSetpointType>(*this);
     }
 
     ~UASFlightMode() override {}
@@ -135,19 +125,23 @@ private:
     } _phase;
 
     rclcpp::Node & _node;
-    //std::shared_ptr<px4_ros2::TrajectorySetpointType> _trajectory_setpoint;
-    std::shared_ptr<px4_ros2::FwLateralLongitudinalSetpointType> _goto_setpoint;
+    
     std::shared_ptr<px4_ros2::OdometryAttitude> _vehicle_state;
+    std::shared_ptr<px4_ros2::OdometryLocalPosition> _vehicle_local_position;
+    std::shared_ptr<px4_ros2::AttitudeSetpointType> _attitude_sp_type;
+
+
 
     Eigen::Quaternionf _turn_start_quaternion;
+    Eigen::Vector3f _position_m;
 
     // Can change as needed
     static constexpr double STRAIGHT_FLIGHT_DURATION = 30; // seconds
     static constexpr float CRUISE_PITCH = 0.05f; // radians
     static constexpr float CRUISE_THRUST = 0.6f; // 60% throttle
-    static constexpr float TURN_BANK_ANGLE = 0.524f; // 30 degrees in rads
+    static constexpr float TURN_BANK_ANGLE = 0.524f; // 45 degrees in rads
     static constexpr float TURN_THRUST = 0.65f; // 65% throttle
-    static constexpr float TURN_RATE = 0.5f; // rad/s
+    static constexpr float TURN_SPEED = 25.0f; // m/s
     static constexpr float g = 9.81f; // m/s^2
     float _cmd_heading_unwrapped = 0.0f;
     float _start_heading_unwrapped = 0.0f;
@@ -155,24 +149,19 @@ private:
     bool _have_prev_heading = false;
 
     void fly_straight() {
-        px4_msgs::msg::VehicleAttitudeSetpoint attitude_sp{};
-        attitude_sp.timestamp = _node.get_clock()->now().nanoseconds()/1000;
-
+        
         // Slight pitch, constant heading
         auto q = euler_to_quaternion(0.0,CRUISE_PITCH,_initial_yaw);
-        
-        attitude_sp.q_d = { static_cast<float>(q.w()),
-                            static_cast<float>(q.x()),
-                            static_cast<float>(q.y()),
-                            static_cast<float>(q.z()) }; // Desired quaternion (needs to be sent as array of floats)
 
-        _attitude_setpoint_pub->publish(attitude_sp);
+        // Thrust Setpoint
+        Eigen::Vector3f thrust_des{CRUISE_THRUST, 0.f, 0.f};
 
-        px4_msgs::msg::VehicleThrustSetpoint thrust_sp{};
-        thrust_sp.timestamp = attitude_sp.timestamp;
-        thrust_sp.xyz[0] = CRUISE_THRUST;
+        _attitude_sp_type->update(
+            q,
+            thrust_des,
+            0
+        );
 
-        _thrust_setpoint_pub->publish(thrust_sp);
     }
 
     // Turn helped fxns
@@ -200,14 +189,16 @@ private:
     }
     void coordinated_turn(float dt) {
         
-        
-        // Get our current orientation
+        // Current Orientation
         auto q = _vehicle_state->attitude();
         float current_heading_wrapped = heading_from_quaternion(q);
 
-        // Unwrap to track cumulative rotation
+        // yaw rate, fxn of bank angle
+        const float TURN_RATE  = (g * std::tan(TURN_BANK_ANGLE)) / TURN_SPEED;
+
+        // Unwrap for cumaltive rotation
         float current_heading_unwrapped;
-        
+
         if (!_have_prev_heading) {
             current_heading_unwrapped = current_heading_wrapped;
             _have_prev_heading = true;
@@ -219,34 +210,19 @@ private:
         // Advance command heading
         _cmd_heading_unwrapped += TURN_RATE * dt;
 
-        // When sending to autopilot, wrap to [-pi pi]
+        // wrap to [-pi, pi] for autopilot
         float desired_heading_wrapped = normalize_angle(_cmd_heading_unwrapped);
 
-        // Thrust setpoint
-        px4_msgs::msg::VehicleThrustSetpoint thrust_sp{};
-        thrust_sp.timestamp = _node.get_clock()->now().nanoseconds()/1000;
-        thrust_sp.xyz[0] = TURN_THRUST;
+        // Manage setpoints
+        auto q_des = euler_to_quaternion(TURN_BANK_ANGLE,CRUISE_PITCH,desired_heading_wrapped);
+        Eigen::Vector3f thrust_des{TURN_THRUST, 0.f, 0.f};
 
-        _thrust_setpoint_pub->publish(thrust_sp);
-
-        // Setpoints for autopilot
-
-        px4_ros2::FwLateralLongitudinalSetpoint sp;
-        px4_ros2::FwControlConfiguration cc;
-
-        sp.withCourse(desired_heading_wrapped);
-
-        // feed-forward centripetal acceleration, could do some dynamics math here to get a
-        // desired turn radius, but I'm NOT doing that
-        float lateral_accel = g * std::tan(TURN_BANK_ANGLE);
-
-        // clamp for safety
-        lateral_accel = std::min(lateral_accel, 0.6f * g); 
-        cc.max_lateral_acceleration = lateral_accel;
-
-        if (_goto_setpoint) {
-            _goto_setpoint->update(sp,cc);
-        }
+        _attitude_sp_type->update(
+            q_des,
+            thrust_des,
+            TURN_RATE
+        );
+        
 
     }
 
@@ -296,6 +272,8 @@ private:
     rclcpp::Publisher<px4_msgs::msg::VehicleAttitudeSetpoint>::SharedPtr _attitude_setpoint_pub;
     rclcpp::Publisher<px4_msgs::msg::VehicleThrustSetpoint>::SharedPtr _thrust_setpoint_pub;
 
+
+
     // Subscribers
     rclcpp::Subscription<px4_msgs::msg::VehicleAttitude>::SharedPtr _attitude_sub;
     rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr _local_position_sub;
@@ -310,14 +288,11 @@ private:
 class executeUAS : public px4_ros2::ModeExecutorBase
 {
 public:
-      executeUAS(px4_ros2::ModeBase & owned_mode)
-    : ModeExecutorBase(
-    px4_ros2::ModeExecutorBase::Settings{}
-      .activate(px4_ros2::ModeExecutorBase::Settings::Activation::ActivateImmediately),
-    owned_mode),
-  _node(owned_mode.node())
-{
-}
+      executeUAS(rclcpp::Node & node, px4_ros2::ModeBase & owned_mode)
+    : ModeExecutorBase(node, {px4_ros2::ModeExecutorBase::Settings::Activation::ActivateImmediately}, owned_mode),
+    _node(node)
+    {
+    }
 
     enum class State
     {
