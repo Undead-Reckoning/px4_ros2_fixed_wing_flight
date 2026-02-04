@@ -10,12 +10,12 @@ In its current implemenation, the UAS will being with a straight line flight for
 
 ## REQUIREMENTS
 - Ubuntu (22.04)
-- USE PX4 1.17, px4_msgs and px4_ros2_cpp must be on the main branch as well.
+- USE PX4 1.16, px4_msgs and px4_ros2_cpp must be on the 1.16 branch as well.
 - PX4 and ROS 2 installations as detailed by https://docs.px4.io/main/en/ros2/user_guide.html 
     - This involves setting up the PX4 toolchain, ROS 2, and the Micro XRCE-DDS Agent 
-    - Tested on PX4 v1.17.0 ROS 2 Humble
+    - Tested on PX4 v1.16.0 ROS 2 Humble
 - QGroundControl
-    - Works with the latest QGC daily 
+    - Works with  QGC daily 
 
 ## Setup
 1. Setup and build a new ROS workspace
@@ -44,7 +44,7 @@ In its current implemenation, the UAS will being with a straight line flight for
     cd ~/PX4-Autopilot # Change this depending on where you installed PX4
     
     # Ignore these 2 lines if you are already on the correct version of PX4
-    git checkout release/1.17
+    git checkout release/1.16
     git submodule update --init --recursive
 
     # Note that at some point we would like to replace rc_cessna
@@ -53,7 +53,14 @@ In its current implemenation, the UAS will being with a straight line flight for
 4. Start QGroundControl. It should connect to the drone in the simulator.
 5. **Return to the first terminal** and run the following. If you closed the terminal, you'll need to run the 2 `source` commands from the first step again beforehand.
     ```bash
-    ros2 run px4_ros2_fixed_wing_flight fly_uas
+    ros2 run px4_ros2_fixed_wing_flight fly_MO
     ```
-6. The drone should automatically arm, takeoff, and start flying.
+6. In QGC, select takeoff. The drone will takeoff and enter a loiter flight. In the top left select the MO Flight and the drone will fly to the desired position. Desired position can be set on line 87 of undead.hpp, in NE coordinates.
+7. Once the a/c reaches 100 m redius, it will automatically land.
+
+## Future Work
+
+1. Altitude hold, pitch down if above 300 m.
+2. Give des_pos in Lat Long (more realistic).
+3. Add calibration loop.
 
