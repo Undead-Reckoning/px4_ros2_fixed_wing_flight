@@ -2,6 +2,9 @@
 ////////////////////////////////////////////////////
 mode.hpp - Defines our custom fixed wing flight mode
 
+// NOTE: This is not our flight mission for MO 2/2.1. I made this exclusivly to learn how to write these.
+// MAIN MO2/2.1 flight code can be found in undead.hpp
+
 Bijan Jourabchi
 University of Colorado Boulder
 Undead Reckoning
@@ -33,7 +36,7 @@ Undead Reckoning
 
 using namespace std::chrono_literals; // NOLINT
 
-static const std::string kName = "UNDEADRECKONING-FLIGHT";
+static const std::string kName = "TestFLIGHT";
 
 class UASFlightMode : public px4_ros2::ModeBase
 {

@@ -21,10 +21,16 @@ include_directories(include ${Eigen3_INCLUDE_DIRS})
 add_executable(fly_uas
   src/main.cpp)
 
+add_executable(
+  fly_MO
+  src/mainUndead.cpp)
+
 ament_target_dependencies(fly_uas Eigen3 px4_ros2_cpp rclcpp)
+ament_target_dependencies(fly_MO Eigen3 px4_ros2_cpp rclcpp)
 
 install(TARGETS
   fly_uas
+  fly_MO
   DESTINATION lib/${PROJECT_NAME}
 )
 
