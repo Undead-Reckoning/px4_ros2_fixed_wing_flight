@@ -17,12 +17,13 @@ Undead Reckoning
 #include <px4_ros2/utils/message_version.hpp>
 #include <px4_ros2/common/setpoint_base.hpp>
 #include <cmath>
+#include <algorithm>
 
 #include <px4_ros2/control/setpoint_types/experimental/attitude.hpp>
 
 // Odometry
 #include <px4_ros2/odometry/attitude.hpp>
-#include <px4_ros2/odometry/local_position.hpp>
+#include <px4_ros2/odometry/global_position.hpp>
 #include <px4_ros2/odometry/airspeed.hpp>
 
 
@@ -49,7 +50,7 @@ public:
 
         // Subscribers for UAS state
         _vehicle_attitude = std::make_shared<px4_ros2::OdometryAttitude>(*this);
-        _vehicle_local_position = std::make_shared<px4_ros2::OdometryLocalPosition>(*this);
+        _vehicle_global_position = std::make_shared<px4_ros2::OdometryGlobalPosition>(*this);
         _vehicle_airspeed = std::make_shared<px4_ros2::OdometryAirspeed>(*this);
 
         // Attitude setpoint control
@@ -63,7 +64,7 @@ public:
     void onActivate() override
     {
         RCLCPP_DEBUG(_node.get_logger(), "Undead Reckoning Flight Activated");
-        _phase = Phase::CALIBRATION;
+        _phase = Phase::INIT;
 
     }
 
@@ -78,17 +79,36 @@ public:
         // State Machine
 
         switch(_phase){
-
-            case Phase::CALIBRATION: {
-
-                _phase = Phase::STRAIGHT;
+            case Phase::INIT:
+            {
+                _phase = Phase::CALIBRATION;
                 _start_att = _vehicle_attitude->attitude();
+
                 _curr_throttle = {0.6f,0.0f,0.0f};
-                _des_pos_xy = {2000.0f,1000.0f}; // North, East [m]
-                break; }
+                _des_pos_LL = {40.079692f,-105.273913f,0}; // Lat, Lon [m]
+                
+                _ref_GPS = _vehicle_global_position->position();
+                auto temp = gps_to_ned(_des_pos_LL, _ref_GPS);
 
-                //calibration();
+                _des_pos_xy = {temp.x(),temp.y()};
 
+                _mode_start = _node.get_clock()->now();
+
+                break;
+            }
+            case Phase::CALIBRATION: 
+            {
+                auto curr_time = _node.get_clock()->now();
+
+                if((curr_time - _mode_start).seconds() > 60.0) { // CHANGE
+                    _phase = Phase::STRAIGHT;
+                    RCLCPP_DEBUG(_node.get_logger(), "CALIBRATION LOOP COMPLETED");
+                    break; // 180 second calibration
+                }
+                
+                calibration(dt);
+                break;
+            }
             case Phase::STRAIGHT: 
                 
                 reached_();
@@ -102,8 +122,10 @@ public:
                 is_aligned();
 
                 if (aligned){
+                    RCLCPP_DEBUG(_node.get_logger(), "ALIGNED: FLYING STRAIGHT");
                     fly_straight(dt);
                 } else{
+                    RCLCPP_DEBUG(_node.get_logger(), "ALIGNING");
                     get_aligned(dt);
                 }
                 
@@ -117,7 +139,8 @@ public:
 private:
 
     enum class Phase {
-        CALIBRATION = 0, 
+        INIT = 0,
+        CALIBRATION, 
         STRAIGHT,
         DONE 
     } _phase;
@@ -127,22 +150,28 @@ private:
     // Member Variables
 
     std::shared_ptr<px4_ros2::AttitudeSetpointType> _attitude_sp_type; // Main control setpoint
-    std::shared_ptr<px4_ros2::OdometryLocalPosition> _vehicle_local_position; // Local position (NED)
+    std::shared_ptr<px4_ros2::OdometryGlobalPosition> _vehicle_global_position; // Local position (NED)
     std::shared_ptr<px4_ros2::OdometryAttitude> _vehicle_attitude; // Attitude quaternion
     std::shared_ptr<px4_ros2::OdometryAirspeed> _vehicle_airspeed; // Airspeed (m/s)
 
     Eigen::Quaternionf _start_att; // self explanatory
+    Eigen::Vector3d _ref_GPS;
     Eigen::Vector3f _curr_throttle; // curr throttle vector
+    Eigen::Vector3d _des_pos_LL; 
     Eigen::Vector2f _des_pos_xy; // Des x,y position in NED [m]
     rclcpp::Time _last_thrust_update = _node.get_clock()->now();
+    rclcpp::Time _last_pitch_update = _node.get_clock()->now();
+    rclcpp::Time _mode_start = _node.get_clock()->now();
     bool aligned = false; // flag to determine if we are aligned in the direction we need to be traveling in to reach our desired position 
     bool reachedGoal = false;
+    float PITCH = 0.05f; // rad GET A REAL ONE
 
     static constexpr float _max_speed_m_s = 13.f; // m/s
-    static constexpr float CRUISE_PITCH = 0.05f; // rad GET A REAL ONE
-    static constexpr float TURN_BANK_ANGLE = 0.524f; // 45 degrees in rads
+    static constexpr float TURN_BANK_ANGLE = 0.523599; // 30 degrees in rads
     static constexpr float g = 9.81f; // m/s^2
-    static constexpr float GOAL_RADIUS = 100; // m
+    static constexpr float GOAL_RADIUS = 10; // m
+    static constexpr float MAX_ALT = 200.0f; // m, max alt
+    static constexpr float kP_alt = 0.05f; // TUNE
 
     template<typename Q>
 
@@ -180,15 +209,30 @@ private:
 
     };
 
+    void calibration(float dt)
+    {
+        float curr_yaw = _vehicle_attitude->yaw();
+        float TURN_RATE  = (g * std::tan(TURN_BANK_ANGLE)) / _max_speed_m_s;
+        _des_thrust(_curr_throttle);
 
+        float cmd_yaw = curr_yaw + TURN_RATE*dt; // Ensures yaw and turn rate are consistant, controller won't work without it
+
+        _attitude_sp_type->update(e2q(TURN_BANK_ANGLE,PITCH, cmd_yaw), // Attitude
+            _curr_throttle, // Thrust
+            TURN_RATE 
+        );
+
+    }
     void fly_straight(float dt)
     {
         
         // Fly straight at a fixed yaw
         // CRUISE_PITCH should be changed to be trim pitch angle
-        Eigen::Quaternionf _des_att = e2q(0.0,CRUISE_PITCH,_vehicle_attitude->yaw());
 
         _des_thrust(_curr_throttle); // updates _curr_throttle
+        _alt_controller(PITCH);
+
+        Eigen::Quaternionf _des_att = e2q(0.0,PITCH,_vehicle_attitude->yaw());
 
         _attitude_sp_type->update(_des_att, // Attitude
             _curr_throttle // Thrust
@@ -222,17 +266,32 @@ private:
         // yaw rate, fxn of bank angle
         float TURN_RATE  = (g * std::tan(TURN_BANK_ANGLE)) / _max_speed_m_s;
 
-        if (yaw_error < 0) TURN_RATE = -abs(TURN_RATE);  // Turn Right
-        if (yaw_error > 0) TURN_RATE = abs(TURN_RATE);  // Turn Left
+        // Apply turn rate in the direction of the error
+        float cmd_turn_rate = 0.0f;
+        float cmd_bank_angle;
+        if (std::abs(yaw_error) > 0.01f) {  // Small threshold to avoid jitter
+            float direction = (yaw_error > 0) ? 1.0f : -1.0f;
+            // Apply direction to both Rate and Bank
+            cmd_turn_rate = direction * TURN_RATE;
+            cmd_bank_angle = direction * TURN_BANK_ANGLE;
+        }
 
         _des_thrust(_curr_throttle); // updates _curr_throttle
 
-        float cmd_yaw = curr_yaw + TURN_RATE*dt;
-
-        _attitude_sp_type->update(e2q(TURN_BANK_ANGLE,CRUISE_PITCH, cmd_yaw), // Attitude
+        float cmd_yaw = curr_yaw + cmd_turn_rate*dt;
+        //_des_pitch(PITCH);
+        _attitude_sp_type->update(e2q(cmd_bank_angle,PITCH, cmd_yaw), // Attitude
             _curr_throttle, // Thrust
             TURN_RATE 
         );
+    }
+
+    static float unwrap_heading(float prev_wrapped, float new_wrapped) {
+        float d = new_wrapped - prev_wrapped;
+        // bring d into [-pi pi]
+        if (d>M_PI) d -= 2.0f * M_PI;
+        else if (d < -M_PI) d += 2.0f * M_PI;
+        return prev_wrapped + d;
     }
 
     void _des_thrust(Eigen::Vector3f & _curr_throttle){ // Get our desired thrust vector to maintain a 30 mph speed
@@ -263,9 +322,32 @@ private:
         _curr_throttle = Eigen::Vector3f(_curr_throttle_x,0,0);
     }
 
+    /*
+    * _alt_controller: pitch up or down to maintain a desired fixed altitude
+    *
+    */
+    void _alt_controller(float & pitch) {
+
+        Eigen::Vector3d LLA = _vehicle_global_position->position();
+        Eigen::Vector3d NED = gps_to_ned(LLA,_ref_GPS);
+
+
+        float curr_alt = -NED.z();
+        float err = MAX_ALT - curr_alt;
+
+        // Pitch Proporitonal Controller
+        float cmd_pitch = err * kP_alt;
+        std::cout << "Cmd Pitch: " << cmd_pitch << std::endl;
+
+        float max_pitch = 0.26f; 
+        PITCH = std::clamp(cmd_pitch, -max_pitch, max_pitch);
+        
+    }
+ 
     float _pos2heading(){ // Get a heading (yaw) in rads from our desired x,y NED pos
         
-        auto curr_pos = _vehicle_local_position->positionNed();
+        Eigen::Vector3d LLA = _vehicle_global_position->position();
+        Eigen::Vector3d curr_pos = gps_to_ned(LLA,_ref_GPS);
 
         // _des_pos_xy = [x (north), y (east)]
 
@@ -280,7 +362,9 @@ private:
     void reached_() {
 
         // Define a circle of radius 100 m (subject to change radius) around the goal
-        auto curr_pos = _vehicle_local_position->positionNed();
+        Eigen::Vector3d LLA = _vehicle_global_position->position();
+        Eigen::Vector3d curr_pos = gps_to_ned(LLA,_ref_GPS);
+
         float dx = _des_pos_xy.x() - curr_pos[0]; 
         float dy = _des_pos_xy.y() - curr_pos[1];
         
@@ -290,6 +374,58 @@ private:
 
         if (Dsqr < GOAL_RADIUS*GOAL_RADIUS) reachedGoal = true;
 
+    }
+
+    
+    /**
+     * Converts Lat/Lon/Alt to NED position relative to a Home location.
+     * * @param lat       Current Latitude (Degrees)
+     * @param lon       Current Longitude (Degrees)
+     * @param alt       Current Altitude (Meters)
+     * @param ref_lat   Home/Origin Latitude (Degrees)
+     * @param ref_lon   Home/Origin Longitude (Degrees)
+     * @param ref_alt   Home/Origin Altitude (Meters)
+     * @return          NED_Pos struct containing x(North), y(East), z(Down)
+     */
+    Eigen::Vector3d gps_to_ned(Eigen::Vector3d LLA, Eigen::Vector3d LLA_ref) {
+        
+        // Inputs
+        float lat = LLA.x();
+        float lon = LLA.y();
+        float alt = LLA.z();
+
+        float ref_lat = LLA_ref.x();
+        float ref_lon = LLA_ref.y();
+        float ref_alt = LLA_ref.z();
+
+        // Constants
+        const float EARTH_RADIUS = 6378137.0f; // Radius of Earth (meters)
+        const float DEG2RAD = M_PI / 180.0f;
+
+        // 1. Calculate Differences in Degrees
+        float lat_err = lat - ref_lat;
+        float lon_err = lon - ref_lon;
+        float alt_err = alt - ref_alt;
+
+        // 2. Convert to Radians (only for trig functions and lat/lon deltas)
+        // Note: We convert the deltas to radians to multiply by Earth Radius
+        float lat_rad = lat_err * DEG2RAD;
+        float lon_rad = lon_err * DEG2RAD;
+
+        // 3. Calculate North (X)
+        // Distance along meridian: Arc length = radius * angle (in radians)
+        double north_m = lat_rad * EARTH_RADIUS;
+
+        // 4. Calculate East (Y)
+        // Distance along parallel: Arc length = radius * angle * cos(latitude)
+        // We use the reference latitude for the cosine scaling
+        double east_m = lon_rad * EARTH_RADIUS * std::cos(ref_lat * DEG2RAD);
+
+        // 5. Calculate Down (Z)
+        // Down is negative altitude change
+        double down_m = -alt_err;
+
+        return Eigen::Vector3d(north_m, east_m, down_m);
     }
 };
 

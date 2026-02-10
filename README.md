@@ -62,5 +62,3 @@ In its current implemenation, the UAS will being with a straight line flight for
 
 1. Altitude hold, pitch down if above 300 m.
 2. Give des_pos in Lat Long (more realistic).
-3. Add calibration loop.
-
