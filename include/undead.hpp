@@ -32,9 +32,6 @@ Undead Reckoning
 #include <px4_msgs/msg/vehicle_global_position.hpp>
 #include <px4_msgs/msg/vehicle_attitude_setpoint.hpp>
 
-//#include <px4_ros2/control/setpoint_types/goto.hpp>
-
-
 using namespace std::chrono_literals; // NOLINT
 
 static const std::string kname = "MOFLIGHT";
@@ -223,6 +220,7 @@ private:
         );
 
     }
+    
     void fly_straight(float dt)
     {
         
@@ -286,14 +284,6 @@ private:
         );
     }
 
-    static float unwrap_heading(float prev_wrapped, float new_wrapped) {
-        float d = new_wrapped - prev_wrapped;
-        // bring d into [-pi pi]
-        if (d>M_PI) d -= 2.0f * M_PI;
-        else if (d < -M_PI) d += 2.0f * M_PI;
-        return prev_wrapped + d;
-    }
-
     void _des_thrust(Eigen::Vector3f & _curr_throttle){ // Get our desired thrust vector to maintain a 30 mph speed
 
         auto current_time = _node.get_clock()->now();
@@ -337,7 +327,6 @@ private:
 
         // Pitch Proporitonal Controller
         float cmd_pitch = err * kP_alt;
-        std::cout << "Cmd Pitch: " << cmd_pitch << std::endl;
 
         float max_pitch = 0.26f; 
         PITCH = std::clamp(cmd_pitch, -max_pitch, max_pitch);

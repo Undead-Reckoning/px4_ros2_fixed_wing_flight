@@ -1,12 +1,11 @@
 ## Flight Mission 
 
-In its current implemenation, the UAS will being with a straight line flight for ~$30$ seconds, before making a ~$270^\circ$ turn, then continuing on with straight line flight until the program is terminated.
+In its current implemenation, the UAS will begin with a calibration turning loop for approx. 180 seconds, before making continuing on with straight line flight to a target position. When the UAS reaches the position, it will land autonomously.
 
 ### Future work includes:
 - Using Gazebo to simulate sensor measurments
 - Implementing EKF and VINS Fusion, adding state uncertainty
 - Ping QGroundControl when the UAS believes it has flown over the target
-- Increasing duration of turning phase to mimic sensor calibration
 
 ## REQUIREMENTS
 - Ubuntu (22.04)
@@ -57,8 +56,3 @@ In its current implemenation, the UAS will being with a straight line flight for
     ```
 6. In QGC, select takeoff. The drone will takeoff and enter a loiter flight. In the top left select the MO Flight and the drone will fly to the desired position. Desired position can be set on line 87 of undead.hpp, in NE coordinates.
 7. Once the a/c reaches 100 m redius, it will automatically land.
-
-## Future Work
-
-1. Altitude hold, pitch down if above 300 m.
-2. Give des_pos in Lat Long (more realistic).
