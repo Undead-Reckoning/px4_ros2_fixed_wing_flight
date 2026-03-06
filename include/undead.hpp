@@ -18,6 +18,8 @@ Undead Reckoning
 #include <px4_ros2/common/setpoint_base.hpp>
 #include <cmath>
 #include <algorithm>
+#include <limits>
+#include <stdexcept>
 
 #include <px4_ros2/control/setpoint_types/experimental/attitude.hpp>
 
@@ -44,6 +46,15 @@ public:
     : ModeBase(node, Settings{kname}),
     _node(node)
     {
+        constexpr double kUnset = std::numeric_limits<double>::quiet_NaN();
+        _final_latitude_deg = _node.declare_parameter<double>("final_latitude_deg", kUnset);
+        _final_longitude_deg = _node.declare_parameter<double>("final_longitude_deg", kUnset);
+        if (std::isnan(_final_latitude_deg) || std::isnan(_final_longitude_deg)) {
+            throw std::runtime_error(
+                "Missing required parameters final_latitude_deg/final_longitude_deg. "
+                "Provide them via --ros-args --params-file <config.yaml>."
+            );
+        }
 
         // Subscribers for UAS state
         _vehicle_attitude = std::make_shared<px4_ros2::OdometryAttitude>(*this);
@@ -62,6 +73,10 @@ public:
     {
         RCLCPP_DEBUG(_node.get_logger(), "Undead Reckoning Flight Activated");
         _phase = Phase::INIT;
+        aligned = false;
+        reachedGoal = false;
+        _curr_throttle = {0.6f, 0.0f, 0.0f};
+        _last_thrust_update = _node.get_clock()->now();
 
     }
 
@@ -82,7 +97,7 @@ public:
                 _start_att = _vehicle_attitude->attitude();
 
                 _curr_throttle = {0.6f,0.0f,0.0f};
-                _des_pos_LL = {40.079692f,-105.273913f,0}; // Lat, Lon [m]
+                _des_pos_LL = {_final_latitude_deg, _final_longitude_deg, 0.0}; // Lat, Lon [deg], Alt [m]
                 
                 _ref_GPS = _vehicle_global_position->position();
                 auto temp = gps_to_ned(_des_pos_LL, _ref_GPS);
@@ -147,7 +162,7 @@ private:
     // Member Variables
 
     std::shared_ptr<px4_ros2::AttitudeSetpointType> _attitude_sp_type; // Main control setpoint
-    std::shared_ptr<px4_ros2::OdometryGlobalPosition> _vehicle_global_position; // Local position (NED)
+    std::shared_ptr<px4_ros2::OdometryGlobalPosition> _vehicle_global_position; // Global position (NED)
     std::shared_ptr<px4_ros2::OdometryAttitude> _vehicle_attitude; // Attitude quaternion
     std::shared_ptr<px4_ros2::OdometryAirspeed> _vehicle_airspeed; // Airspeed (m/s)
 
@@ -156,6 +171,8 @@ private:
     Eigen::Vector3f _curr_throttle; // curr throttle vector
     Eigen::Vector3d _des_pos_LL; 
     Eigen::Vector2f _des_pos_xy; // Des x,y position in NED [m]
+    double _final_latitude_deg{};
+    double _final_longitude_deg{};
     rclcpp::Time _last_thrust_update = _node.get_clock()->now();
     rclcpp::Time _last_pitch_update = _node.get_clock()->now();
     rclcpp::Time _mode_start = _node.get_clock()->now();
@@ -166,9 +183,10 @@ private:
     static constexpr float _max_speed_m_s = 13.f; // m/s
     static constexpr float TURN_BANK_ANGLE = 0.523599; // 30 degrees in rads
     static constexpr float g = 9.81f; // m/s^2
-    static constexpr float GOAL_RADIUS = 10; // m
+    static constexpr float GOAL_RADIUS = 1; // m
     static constexpr float MAX_ALT = 200.0f; // m, max alt
     static constexpr float kP_alt = 0.05f; // TUNE
+    static constexpr float kP_thr = 0.05f; // TUNE
 
     template<typename Q>
 
@@ -266,7 +284,7 @@ private:
 
         // Apply turn rate in the direction of the error
         float cmd_turn_rate = 0.0f;
-        float cmd_bank_angle;
+        float cmd_bank_angle = 0.0f;
         if (std::abs(yaw_error) > 0.01f) {  // Small threshold to avoid jitter
             float direction = (yaw_error > 0) ? 1.0f : -1.0f;
             // Apply direction to both Rate and Bank
@@ -280,7 +298,7 @@ private:
         //_des_pitch(PITCH);
         _attitude_sp_type->update(e2q(cmd_bank_angle,PITCH, cmd_yaw), // Attitude
             _curr_throttle, // Thrust
-            TURN_RATE 
+            cmd_turn_rate 
         );
     }
 
@@ -295,21 +313,22 @@ private:
         // Update our timestamp
         _last_thrust_update = current_time;
 
-        auto _curr_throttle_x = _curr_throttle.x();
+        // auto _curr_throttle_x = _curr_throttle.x();
         auto _true_airspeed = _vehicle_airspeed->trueAirspeed();
 
-        if (_true_airspeed > _max_speed_m_s) // REDUCE
-        {
-            _curr_throttle_x -= 0.05f;
-        } else { // INCREASE
-            _curr_throttle_x += 0.05f;
+        if (!std::isfinite(_true_airspeed)) {
+            return;
         }
 
-        // CLAMP, never let throttle go above 1, below 0
-        if (_curr_throttle_x > 1.0) _curr_throttle_x = 1.0f;
-        if (_curr_throttle_x < 0) _curr_throttle_x = 0.0f;
+        // Keep a trim throttle and apply proportional correction around it.
+        constexpr float kTrimThrottle = 0.6f;
+        constexpr float kMinThrottle = 0.35f;
+        float err = _max_speed_m_s - _true_airspeed;
+        float cmd_thr = kTrimThrottle + (err * kP_thr);
+        cmd_thr = std::clamp(cmd_thr, kMinThrottle, 1.0f);
 
-        _curr_throttle = Eigen::Vector3f(_curr_throttle_x,0,0);
+
+        _curr_throttle = Eigen::Vector3f(cmd_thr,0,0);
     }
 
     /*
@@ -361,7 +380,7 @@ private:
         float Dsqr = dx*dx + dy*dy;
         std::cout << Dsqr << std::endl;
 
-        if (Dsqr < GOAL_RADIUS*GOAL_RADIUS) reachedGoal = true;
+        reachedGoal = (Dsqr < GOAL_RADIUS*GOAL_RADIUS);
 
     }
 
@@ -492,4 +511,3 @@ private:
     rclcpp::Node &_node;
 
 };
-

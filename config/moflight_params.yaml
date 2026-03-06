@@ -1,0 +1,4 @@
+mission:
+  ros__parameters:
+    final_latitude_deg: 39.972657
+    final_longitude_deg: -105.231537

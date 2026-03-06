@@ -25,13 +25,24 @@ add_executable(
   fly_MO
   src/mainUndead.cpp)
 
+add_executable(
+  fly_test
+  src/main_test.cpp)
+
 ament_target_dependencies(fly_uas Eigen3 px4_ros2_cpp rclcpp)
 ament_target_dependencies(fly_MO Eigen3 px4_ros2_cpp rclcpp)
+ament_target_dependencies(fly_test Eigen3 px4_ros2_cpp rclcpp)
 
 install(TARGETS
   fly_uas
   fly_MO
+  fly_test
   DESTINATION lib/${PROJECT_NAME}
+)
+
+install(DIRECTORY
+  config
+  DESTINATION share/${PROJECT_NAME}
 )
 
 

@@ -1,0 +1,7 @@
+mission_test:
+  ros__parameters:
+    rectangle_lat_deg: [39.976170, 39.973737, 39.973737, 39.976170]
+    rectangle_lon_deg: [-105.231621, -105.231621, -105.228906, -105.228906]
+    flight_time_s: 300.0
+    max_speed_m_s: 13.0
+    max_alt_m: 200.0
