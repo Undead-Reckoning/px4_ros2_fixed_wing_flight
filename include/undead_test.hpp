@@ -72,8 +72,14 @@ public:
                     _phase = Phase::DONE;
                     break;
                 }
-                _segment = Segment::LINE_1;
-                _phase = Phase::FLY;
+                _phase = Phase::GO_TO_START;
+                break;
+
+            case Phase::GO_TO_START:
+                if (commandStartPointAcquire(dt)) {
+                    _segment = Segment::LINE_1;
+                    _phase = Phase::FLY;
+                }
                 break;
 
             case Phase::FLY:
@@ -96,6 +102,7 @@ public:
 private:
     enum class Phase {
         INIT = 0,
+        GO_TO_START,
         FLY,
         DONE,
     } _phase{Phase::INIT};
@@ -143,6 +150,9 @@ private:
     static constexpr float kMaxPitchRad = 0.26f;
     static constexpr float kLineCaptureMeters = 8.0f;
     static constexpr float kArcCaptureRad = 0.08f;
+    static constexpr float kArcEndCaptureMeters = 15.0f;
+    static constexpr float kArcRadiusToleranceMeters = 15.0f;
+    static constexpr float kStartCaptureMeters = 1.0f;
 
     Eigen::Vector3f _curr_throttle{0.6f, 0.0f, 0.0f};
     float _pitch_cmd_rad{0.05f};
@@ -352,7 +362,18 @@ private:
             progress = wrapToPositive(arc.start_ang_rad - theta_now);
         }
 
-        return progress >= (arc.total_progress_rad - kArcCaptureRad);
+        const Eigen::Vector2f end_pt(
+            arc.center.x() + arc.radius_m * std::cos(arc.end_ang_rad),
+            arc.center.y() + arc.radius_m * std::sin(arc.end_ang_rad));
+        const float dist_to_end = (end_pt - pos).norm();
+        const float radius_err = std::fabs((pos - arc.center).norm() - arc.radius_m);
+        RCLCPP_DEBUG(_node.get_logger(), "progress: %.2f, dist_to_end: %.2f, radius_err: %.2f",
+            progress, dist_to_end, radius_err);
+        RCLCPP_DEBUG(_node.get_logger(), "arc.total_progress_rad - kArcCaptureRad: %.2f, kArcEndCaptureMeters: %.2f, kArcRadiusToleranceMeters: %.2f",
+            arc.total_progress_rad - kArcCaptureRad, kArcEndCaptureMeters, kArcRadiusToleranceMeters);
+        return progress >= (arc.total_progress_rad - kArcCaptureRad) &&
+               dist_to_end <= kArcEndCaptureMeters &&
+               radius_err <= kArcRadiusToleranceMeters;
     }
 
     void commandCurrentSegment(float dt)
@@ -398,6 +419,35 @@ private:
         }
     }
 
+    bool commandStartPointAcquire(float dt)
+    {
+        const Eigen::Vector2f pos = currentPositionNed2D();
+        const float dist_to_start = (_track_ned[0] - pos).norm();
+
+        if (dist_to_start <= kStartCaptureMeters) {
+            RCLCPP_INFO(_node.get_logger(), "Reached start waypoint, entering rectangle loop");
+            return true;
+        }
+
+        updateThrottleHold();
+        updateAltitudeHold();
+
+        const float yaw_cmd = headingLine(pos, _track_ned[0]);
+        const float yaw_err = wrapAngle(yaw_cmd - _vehicle_attitude->yaw());
+        constexpr float kYawRatePGain = 1.5f;  // [rad/s] per [rad] heading error
+        const float max_yaw_rate = turnRateForSpeed();
+        const float yaw_rate_cmd = std::clamp(kYawRatePGain * yaw_err, -max_yaw_rate, max_yaw_rate);
+        const float bank_cmd = std::clamp(
+            (yaw_rate_cmd / max_yaw_rate) * kTurnBankAngleRad,
+            -kTurnBankAngleRad,
+            kTurnBankAngleRad);
+        const float yaw_sp = _vehicle_attitude->yaw() + yaw_rate_cmd * dt;
+
+        const Eigen::Quaternionf att_sp = e2q(bank_cmd, _pitch_cmd_rad, yaw_sp);
+        _attitude_sp_type->update(att_sp, _curr_throttle, yaw_rate_cmd);
+        return false;
+    }
+
     void computeArcCommand(
         const ArcDef & arc,
         float dt,
@@ -407,13 +457,35 @@ private:
         bool & use_yaw_rate) const
     {
         const Eigen::Vector2f pos = currentPositionNed2D();
+        const Eigen::Vector2f rel = pos - arc.center;
+        const float radius = std::max(arc.radius_m, 1.0f);
+        const float r_now = std::max(rel.norm(), 1.0f);
         const float theta = std::atan2(pos.y() - arc.center.y(), pos.x() - arc.center.x());
         const float tangent_heading = wrapAngle(theta + arc.direction * kHalfPi);
+        const float radial_err = r_now - radius;
 
-        const float rate = arc.direction * turnRateForSpeed();
-        bank_cmd = arc.direction * kTurnBankAngleRad;
-        yaw_rate_cmd = rate;
-        yaw_cmd = tangent_heading + yaw_rate_cmd * dt;
+        // Orbit guidance: bias tangent heading inward/outward based on radial error.
+        constexpr float kOrbitGain = 3.0f;
+        const float heading_correction = std::atan(kOrbitGain * radial_err / radius);
+        const float desired_heading = wrapAngle(tangent_heading + arc.direction * heading_correction);
+
+        float speed_m_s = static_cast<float>(_max_speed_m_s);
+        const float tas = _vehicle_airspeed->trueAirspeed();
+        if (std::isfinite(tas) && tas > 1.0f) {
+            speed_m_s = tas;
+        }
+
+        const float max_rate_from_bank = (kGravity * std::tan(kTurnBankAngleRad)) / std::max(speed_m_s, 1.0f);
+        const float yaw_rate_ff = arc.direction * (speed_m_s / radius);
+        const float yaw_err = wrapAngle(desired_heading - _vehicle_attitude->yaw());
+        constexpr float kYawRateHeadingGain = 1.5f;
+        const float yaw_rate_fb = kYawRateHeadingGain * yaw_err;
+        const float commanded_yaw_rate = std::clamp(yaw_rate_ff + yaw_rate_fb, -max_rate_from_bank, max_rate_from_bank);
+
+        yaw_rate_cmd = commanded_yaw_rate;
+        const float commanded_bank = std::atan((speed_m_s * yaw_rate_cmd) / kGravity);
+        bank_cmd = std::clamp(commanded_bank, -kTurnBankAngleRad, kTurnBankAngleRad);
+        yaw_cmd = _vehicle_attitude->yaw() + yaw_rate_cmd * dt;
         use_yaw_rate = true;
     }
 
