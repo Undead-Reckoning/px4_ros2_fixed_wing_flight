@@ -25,6 +25,7 @@ Based on undead.hpp mission architecture.
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 using namespace std::chrono_literals;  // NOLINT
@@ -83,7 +84,8 @@ public:
                 break;
 
             case Phase::FLY:
-                if ((_node.get_clock()->now() - _mode_start).seconds() >= _flight_time_s) {
+                if ((_node.get_clock()->now() - _mode_start).seconds() >= _flight_time_s ||
+                    waypointCount(waypointcnt)) {
                     RCLCPP_INFO(_node.get_logger(), "UNDEAD_TEST time complete");
                     _phase = Phase::DONE;
                     break;
@@ -100,6 +102,24 @@ public:
     }
 
 private:
+    struct Vector2fHash {
+        std::size_t operator()(const Eigen::Vector2f & v) const noexcept
+        {
+            const std::size_t hx = std::hash<float>{}(v.x());
+            const std::size_t hy = std::hash<float>{}(v.y());
+            return hx ^ (hy + 0x9e3779b9U + (hx << 6U) + (hx >> 2U));
+        }
+    };
+
+    struct Vector2fEqual {
+        bool operator()(const Eigen::Vector2f & a, const Eigen::Vector2f & b) const noexcept
+        {
+            return a.x() == b.x() && a.y() == b.y();
+        }
+    };
+
+    using WaypointCountMap = std::unordered_map<Eigen::Vector2f, int, Vector2fHash, Vector2fEqual>;
+
     enum class Phase {
         INIT = 0,
         GO_TO_START,
@@ -123,6 +143,8 @@ private:
         float total_progress_rad{0.0f};
     };
 
+
+
     rclcpp::Node & _node;
 
     std::shared_ptr<px4_ros2::AttitudeSetpointType> _attitude_sp_type;
@@ -132,6 +154,7 @@ private:
 
     std::array<Eigen::Vector3d, 4> _rectangle_lla{};
     std::array<Eigen::Vector2f, 4> _track_ned{};
+    WaypointCountMap waypointcnt;
     ArcDef _arc1{};
     ArcDef _arc2{};
 
@@ -161,6 +184,15 @@ private:
     rclcpp::Time _mode_start{0, 0, RCL_ROS_TIME};
     rclcpp::Time _last_thrust_update{0, 0, RCL_ROS_TIME};
 
+    bool waypointCount(const WaypointCountMap & map) const
+    {
+        for (const auto& pair : map) {
+            if (pair.second != 3) {
+                return false; // Found a value that does not match
+            }
+        }
+        return true; // All values matched
+    }
     static float wrapAngle(float a)
     {
         return std::atan2(std::sin(a), std::cos(a));
@@ -240,6 +272,7 @@ private:
         for (size_t i = 0; i < 4; ++i) {
             const Eigen::Vector3d ned3 = gpsToNed(_rectangle_lla[i], _ref_gps);
             _track_ned[i] = Eigen::Vector2f(static_cast<float>(ned3.x()), static_cast<float>(ned3.y()));
+            waypointcnt[_track_ned[i]] = 0;
         }
 
         // Re-index so edge (0->1) is one of the long edges.
@@ -325,12 +358,16 @@ private:
             case Segment::LINE_1: {
                 const float remain = (_track_ned[1] - pos).norm();
                 if (remain <= kLineCaptureMeters) {
+                    waypointcnt[_track_ned[0]] += 1;
+                    RCLCPP_DEBUG(_node.get_logger(),"Point 1 Count = %i", waypointcnt[_track_ned[0]]);
                     _segment = Segment::ARC_1;
                 }
                 break;
             }
             case Segment::ARC_1: {
                 if (arcNearComplete(pos, _arc1)) {
+                    waypointcnt[_track_ned[1]] += 1;
+                    RCLCPP_DEBUG(_node.get_logger(),"Point 2 Count = %i", waypointcnt[_track_ned[1]]);
                     _segment = Segment::LINE_2;
                 }
                 break;
@@ -338,12 +375,16 @@ private:
             case Segment::LINE_2: {
                 const float remain = (_track_ned[3] - pos).norm();
                 if (remain <= kLineCaptureMeters) {
+                    waypointcnt[_track_ned[2]] += 1;
+                    RCLCPP_DEBUG(_node.get_logger(),"Point 3 Count = %i", waypointcnt[_track_ned[2]]);
                     _segment = Segment::ARC_2;
                 }
                 break;
             }
             case Segment::ARC_2: {
                 if (arcNearComplete(pos, _arc2)) {
+                    waypointcnt[_track_ned[3]] += 1;
+                    RCLCPP_DEBUG(_node.get_logger(),"Point 4 Count = %i", waypointcnt[_track_ned[3]]);
                     _segment = Segment::LINE_1;
                 }
                 break;
@@ -367,10 +408,7 @@ private:
             arc.center.y() + arc.radius_m * std::sin(arc.end_ang_rad));
         const float dist_to_end = (end_pt - pos).norm();
         const float radius_err = std::fabs((pos - arc.center).norm() - arc.radius_m);
-        RCLCPP_DEBUG(_node.get_logger(), "progress: %.2f, dist_to_end: %.2f, radius_err: %.2f",
-            progress, dist_to_end, radius_err);
-        RCLCPP_DEBUG(_node.get_logger(), "arc.total_progress_rad - kArcCaptureRad: %.2f, kArcEndCaptureMeters: %.2f, kArcRadiusToleranceMeters: %.2f",
-            arc.total_progress_rad - kArcCaptureRad, kArcEndCaptureMeters, kArcRadiusToleranceMeters);
+
         return progress >= (arc.total_progress_rad - kArcCaptureRad) &&
                dist_to_end <= kArcEndCaptureMeters &&
                radius_err <= kArcRadiusToleranceMeters;
@@ -423,6 +461,7 @@ private:
     {
         const Eigen::Vector2f pos = currentPositionNed2D();
         const float dist_to_start = (_track_ned[0] - pos).norm();
+        
 
         if (dist_to_start <= kStartCaptureMeters) {
             RCLCPP_INFO(_node.get_logger(), "Reached start waypoint, entering rectangle loop");
