@@ -52,7 +52,7 @@ In its current implemenation, the UAS will begin with a calibration turning loop
 4. Start QGroundControl. It should connect to the drone in the simulator.
 5. **Return to the first terminal** and run the following. If you closed the terminal, you'll need to run the 2 `source` commands from the first step again beforehand.
     ```bash
-    ros2 run px4_ros2_fixed_wing_flight fly_MO --ros-args --params-file src/px4_ros2_fixed_wing_flight/config/moflight_params.yaml
+    ros2 run px4_ros2_fixed_wing_flight fly_test --ros-args --params-file src/px4_ros2_fixed_wing_flight/config/undead_test_params.yaml
     ```
 6. In QGC, select takeoff. The drone will takeoff and enter a loiter flight. In the top left select the MO Flight and the drone will fly to the desired position from the config file (`final_latitude_deg`, `final_longitude_deg`).
 7. Once the a/c reaches 100 m redius, it will automatically land.
