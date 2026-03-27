@@ -17,6 +17,7 @@ Based on undead.hpp mission architecture.
 
 #include <px4_ros2/odometry/attitude.hpp>
 #include <px4_ros2/odometry/global_position.hpp>
+#include <px4_ros2/odometry/local_position.hpp>
 #include <px4_ros2/odometry/airspeed.hpp>
 
 #include <algorithm>
@@ -42,6 +43,7 @@ public:
         loadParameters();
 
         _vehicle_attitude = std::make_shared<px4_ros2::OdometryAttitude>(*this);
+        _vehicle_local_position = std::make_shared<px4_ros2::OdometryLocalPosition>(*this);
         _vehicle_global_position = std::make_shared<px4_ros2::OdometryGlobalPosition>(*this);
         _vehicle_airspeed = std::make_shared<px4_ros2::OdometryAirspeed>(*this);
         _attitude_sp_type = std::make_shared<px4_ros2::AttitudeSetpointType>(*this);
@@ -148,6 +150,7 @@ private:
     rclcpp::Node & _node;
 
     std::shared_ptr<px4_ros2::AttitudeSetpointType> _attitude_sp_type;
+    std::shared_ptr<px4_ros2::OdometryLocalPosition> _vehicle_local_position;
     std::shared_ptr<px4_ros2::OdometryGlobalPosition> _vehicle_global_position;
     std::shared_ptr<px4_ros2::OdometryAttitude> _vehicle_attitude;
     std::shared_ptr<px4_ros2::OdometryAirspeed> _vehicle_airspeed;
@@ -345,8 +348,8 @@ private:
 
     Eigen::Vector2f currentPositionNed2D() const
     {
-        const Eigen::Vector3d lla = _vehicle_global_position->position();
-        const Eigen::Vector3d ned = gpsToNed(lla, _ref_gps);
+        // const Eigen::Vector3d lla = _vehicle_global_position->positionNed();
+        const Eigen::Vector3f ned = _vehicle_local_position->positionNed();
         return Eigen::Vector2f(static_cast<float>(ned.x()), static_cast<float>(ned.y()));
     }
 
@@ -553,8 +556,8 @@ private:
 
     void updateAltitudeHold()
     {
-        const Eigen::Vector3d lla = _vehicle_global_position->position();
-        const Eigen::Vector3d ned = gpsToNed(lla, _ref_gps);
+        // const Eigen::Vector3d lla = _vehicle_global_position->positionNed();
+        const Eigen::Vector3f ned =  _vehicle_local_position->positionNed();
         const float curr_alt = static_cast<float>(-ned.z());
 
         const float err = static_cast<float>(_max_alt_m) - curr_alt;
